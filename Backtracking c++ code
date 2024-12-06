@@ -1,0 +1,234 @@
+#include <bits/stdc++.h>
+using namespace std;
+
+//=========================================================
+// Interfaces
+//=========================================================
+
+class IPrinter {
+public:
+    virtual ~IPrinter() = default;
+    virtual void printSolution(const vector<vector<int>>& board, int solutionCount) = 0;
+};
+
+class ISolver {
+public:
+    virtual ~ISolver() = default;
+    virtual void solve() = 0;
+};
+
+//=========================================================
+// Board class: Responsible for storing and manipulating the Sudoku board
+//=========================================================
+
+class Board {
+private:
+    static const int BoardSize = 9;
+    static const int CellSize = 3;
+
+    // Normal 2D grid representation of the board
+    vector<vector<int>> board;
+
+    // Bitmask arrays to track taken numbers in rows, columns, and subgrids
+    // For each row/col/box: a bit set means that number is already taken.
+    vector<long long> takenRow;
+    vector<long long> takenCol;
+    vector<vector<long long>> takenGrid;
+
+    // A 2D vector of bitmasks to represent possible candidates for each cell
+    // If board[row][col] == 0, possible[row][col] is a bitmask of valid candidates.
+    // If board[row][col] != 0, possible[row][col] = (1 << board[row][col])
+    vector<vector<int>> possible;
+
+    // Precomputed log table for fast bit position calculation
+    vector<int> logtwo;
+
+public:
+    Board() : board(BoardSize, vector<int>(BoardSize, 0)), 
+              takenRow(BoardSize, 0), 
+              takenCol(BoardSize, 0), 
+              takenGrid(CellSize, vector<long long>(CellSize, 0)),
+              possible(BoardSize, vector<int>(BoardSize, 0)) {
+        logtwo.resize(1 << (BoardSize+1), -1);
+        for (int i = 0; i <= BoardSize; i++) {
+            if ((1 << i) < (int)logtwo.size()) {
+                logtwo[1 << i] = i;
+            }
+        }
+    }
+
+    int getBoardSize() const { return BoardSize; }
+    int getCellSize() const { return CellSize; }
+
+    void setCell(int row, int col, int val) {
+        board[row][col] = val;
+        if (val > 0) {
+            // For fixed cells in the initial puzzle:
+            takenRow[row] ^= (1 << val);
+            takenCol[col] ^= (1 << val);
+            takenGrid[row/CellSize][col/CellSize] ^= (1 << val);
+            possible[row][col] = (1 << val);
+        } else {
+            // For empty cells, we do not have a direct candidate mask yet,
+            // it will be computed when needed.
+            possible[row][col] = 0;
+        }
+    }
+
+    int getCell(int row, int col) const {
+        return board[row][col];
+    }
+
+    const vector<vector<int>>& getBoard() const {
+        return board;
+    }
+
+    // Make a move and update tracking arrays
+    void makeMove(int val, int row, int col) {
+        if (val == 0) return;
+        takenRow[row] ^= (1 << val);
+        takenCol[col] ^= (1 << val);
+        takenGrid[row/CellSize][col/CellSize] ^= (1 << val);
+        board[row][col] = val;
+        possible[row][col] = (1 << val);
+    }
+
+    // Revert a move
+    void revertMove(int val, int row, int col) {
+        if (val == 0) return;
+        takenRow[row] ^= (1 << val);
+        takenCol[col] ^= (1 << val);
+        takenGrid[row/CellSize][col/CellSize] ^= (1 << val);
+        board[row][col] = 0;
+        possible[row][col] = 0; // Now it's empty, no direct candidate mask assigned.
+    }
+
+    // Get possible choices for a given cell using bitmasking
+    int getChoiceMask(int row, int col) {
+        if (board[row][col] != 0) {
+            // If cell is filled, the only possibility is that value
+            return (1 << board[row][col]);
+        }
+
+        int used = (int)(takenRow[row] | takenCol[col] | takenGrid[row/CellSize][col/CellSize]);
+        int fullMask = (1 << (BoardSize+1)) - 1; // For 1 to 9
+        int notTaken = (fullMask ^ used);
+        if (notTaken & 1) notTaken ^= 1; // Remove bit 0 if set
+        // Store the possible candidates (for demonstration)
+        possible[row][col] = notTaken;
+        return notTaken;
+    }
+
+    // Helper to get the value (1 to 9) from a mask that has exactly one bit set
+    int getValueFromMask(int mask) {
+        return logtwo[mask];
+    }
+};
+
+//=========================================================
+// SudokuPuzzle class: Responsible for initializing the puzzle
+//=========================================================
+
+class SudokuPuzzle {
+private:
+    Board &board;
+public:
+    SudokuPuzzle(Board &b) : board(b) {}
+
+    void loadFromStream(istream &in) {
+        int size = board.getBoardSize();
+        for (int i = 0; i < size; i++) {
+            for (int j = 0; j < size; j++) {
+                int val; in >> val;
+                board.setCell(i, j, val);
+            }
+        }
+    }
+};
+
+//=========================================================
+// ConsolePrinter: Implements IPrinter to print to console
+//=========================================================
+
+class ConsolePrinter : public IPrinter {
+public:
+    void printSolution(const vector<vector<int>>& board, int solutionCount) override {
+        cout << "Answer : " << solutionCount << "\n";
+        for (auto &row : board) {
+            for (auto &val : row) {
+                cout << val << " ";
+            }
+            cout << "\n";
+        }
+        cout << "\n";
+    }
+};
+
+//=========================================================
+// BacktrackingSolver: A concrete solver implementing ISolver
+//=========================================================
+
+class BacktrackingSolver : public ISolver {
+private:
+    Board &board;
+    IPrinter &printer;
+    int ans = 0;
+
+    void solveCell(int row, int col) {
+        int size = board.getBoardSize();
+        if (col == size) {
+            solveCell(row+1, 0);
+            return;
+        }
+        if (row == size) {
+            // Base case: One solution found
+            ans++;
+            printer.printSolution(board.getBoard(), ans);
+            return;
+        }
+
+        int val = board.getCell(row, col);
+        if (val == 0) {
+            // Need to fill this cell
+            int chMask = board.getChoiceMask(row, col);
+            while (chMask) {
+                int last1 = chMask & (-chMask); // Extract lowest set bit
+                int chosenVal = board.getValueFromMask(last1);
+                board.makeMove(chosenVal, row, col);
+                solveCell(row, col + 1);
+                board.revertMove(chosenVal, row, col);
+                chMask = chMask & (chMask - 1);
+            }
+        } else {
+            // Pre-filled cell, just move to the next cell
+            solveCell(row, col + 1);
+        }
+    }
+
+public:
+    BacktrackingSolver(Board &b, IPrinter &p) : board(b), printer(p) {}
+
+    void solve() override {
+        solveCell(0,0);
+    }
+};
+
+//=========================================================
+// main function
+//=========================================================
+
+int main() {
+    ios_base::sync_with_stdio(false);
+    cin.tie(nullptr);
+    cout.tie(nullptr);
+
+    Board board;
+    SudokuPuzzle puzzle(board);
+    puzzle.loadFromStream(cin);
+
+    ConsolePrinter printer;
+    BacktrackingSolver solver(board, printer);
+
+    solver.solve();
+    return 0;
+}
